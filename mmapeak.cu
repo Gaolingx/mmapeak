@@ -524,6 +524,41 @@ __global__ void fma_fp64(void *data, int *rc)
     *rc = 0;
 }
 
+// FP64 Tensor Core: mma.m8n8k4 (Ampere / SM80+)
+#if __CUDA_ARCH__ >= 800
+__device__ void mma_f64f64f64_8_8_4_(double *data)
+{
+    double d0 = 0.0;
+    double d1 = 0.0;
+    double a = 0.0;
+    double b = 0.0;
+    for (unsigned k = 0; k < N_LOOP_INTERNAL; k++)
+    {
+        asm volatile(
+            "mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+            "{%0, %1}, {%2}, {%3}, {%4, %5};\n"
+            : "=d"(d0), "=d"(d1)
+            : "d"(a), "d"(b), "d"(d0), "d"(d1));
+        __syncwarp();
+    }
+    // Each thread holds 2 f64 accumulators; 32 threads cover 8x8 = 64 elements
+    double *ptr = &data[threadIdx.y * 8 * 8];
+    ptr[threadIdx.x * 2 + 0] = d0;
+    ptr[threadIdx.x * 2 + 1] = d1;
+}
+
+__global__ void mma_f64f64f64_8_8_4(void *data, int *rc)
+{
+    mma_f64f64f64_8_8_4_((double *)data);
+    *rc = 0;
+}
+#else
+__global__ void mma_f64f64f64_8_8_4(void *data, int *rc)
+{
+    *rc = 1;
+}
+#endif
+
 #if __CUDA_ARCH__ >= 800
 __global__ void mma_bf16bf16f32_16_16_16(void *data, int *rc)
 {
@@ -836,6 +871,8 @@ int main(int argc, char **argv)
         run_fma<float>((void *)fma_fp32, "fma_fp32", targetTime);
 
         print_heading("FP64", '-');
+        printf("- mma_f64f64f64_8_8_4\n");
+        run<double, 8, 8, 4>((void *)mma_f64f64f64_8_8_4, targetTime);
         printf("- fma_fp64 (scalar)\n");
         run_fma<double>((void *)fma_fp64, "fma_fp64", targetTime);
     }
