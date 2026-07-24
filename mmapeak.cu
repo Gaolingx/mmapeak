@@ -524,10 +524,13 @@ __global__ void fma_fp64(void *data, int *rc)
     *rc = 0;
 }
 
-// FP64 Tensor Core: mma.m8n8k4 — datacenter only
-// Supported: SM80 (A100), SM90 (H100/H200), SM100–SM110 (Blackwell DC)
-// NOT supported: SM86/87 (GA10x/Orin), SM89 (Ada), SM120+ (consumer Blackwell)
-// Using >= 800 incorrectly emits this insn on consumer GPUs → illegal instruction
+// FP64 Tensor Core — datacenter only
+// SM80 (A100):            m8n8k4 only
+// SM90 (H100/H200):       m8n8k4 + m16n8k4 + m16n8k8 + m16n8k16
+// SM100–SM110 (B200 DC):  same as SM90 (legacy mma.sync)
+// NOT supported: SM86/87, SM89 (Ada), SM120+ (consumer Blackwell)
+
+// m8n8k4: SM80 / SM90 / SM100–SM110
 #if (__CUDA_ARCH__ == 800) ||                       \
     (__CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000) || \
     (__CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1200)
@@ -559,6 +562,121 @@ __global__ void mma_f64f64f64_8_8_4(void *data, int *rc)
 }
 #else
 __global__ void mma_f64f64f64_8_8_4(void *data, int *rc)
+{
+    *rc = 1;
+}
+#endif
+
+// m16n8k4 / m16n8k8 / m16n8k16: SM90+ and SM100–SM110 (not SM80)
+#if (__CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000) || \
+    (__CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1200)
+// Fragments (per thread): A=2, B=1, C/D=4 doubles
+__device__ void mma_f64f64f64_16_8_4_(double *data)
+{
+    double d0 = 0.0, d1 = 0.0, d2 = 0.0, d3 = 0.0;
+    double a0 = 0.0, a1 = 0.0;
+    double b0 = 0.0;
+    for (unsigned k = 0; k < N_LOOP_INTERNAL; k++)
+    {
+        asm volatile(
+            "mma.sync.aligned.m16n8k4.row.col.f64.f64.f64.f64.rn "
+            "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
+            : "=d"(d0), "=d"(d1), "=d"(d2), "=d"(d3)
+            : "d"(a0), "d"(a1),
+              "d"(b0),
+              "d"(d0), "d"(d1), "d"(d2), "d"(d3));
+        __syncwarp();
+    }
+    // Each thread holds 4 f64 accumulators; 32 threads cover 16x8 = 128 elements
+    double *ptr = &data[threadIdx.y * 16 * 8];
+    ptr[threadIdx.x * 4 + 0] = d0;
+    ptr[threadIdx.x * 4 + 1] = d1;
+    ptr[threadIdx.x * 4 + 2] = d2;
+    ptr[threadIdx.x * 4 + 3] = d3;
+}
+
+// Fragments (per thread): A=4, B=2, C/D=4 doubles
+__device__ void mma_f64f64f64_16_8_8_(double *data)
+{
+    double d0 = 0.0, d1 = 0.0, d2 = 0.0, d3 = 0.0;
+    double a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+    double b0 = 0.0, b1 = 0.0;
+    for (unsigned k = 0; k < N_LOOP_INTERNAL; k++)
+    {
+        asm volatile(
+            "mma.sync.aligned.m16n8k8.row.col.f64.f64.f64.f64 "
+            "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
+            : "=d"(d0), "=d"(d1), "=d"(d2), "=d"(d3)
+            : "d"(a0), "d"(a1), "d"(a2), "d"(a3),
+              "d"(b0), "d"(b1),
+              "d"(d0), "d"(d1), "d"(d2), "d"(d3));
+        __syncwarp();
+    }
+    double *ptr = &data[threadIdx.y * 16 * 8];
+    ptr[threadIdx.x * 4 + 0] = d0;
+    ptr[threadIdx.x * 4 + 1] = d1;
+    ptr[threadIdx.x * 4 + 2] = d2;
+    ptr[threadIdx.x * 4 + 3] = d3;
+}
+
+// Fragments (per thread): A=8, B=4, C/D=4 doubles
+__device__ void mma_f64f64f64_16_8_16_(double *data)
+{
+    double d0 = 0.0, d1 = 0.0, d2 = 0.0, d3 = 0.0;
+    double a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+    double a4 = 0.0, a5 = 0.0, a6 = 0.0, a7 = 0.0;
+    double b0 = 0.0, b1 = 0.0, b2 = 0.0, b3 = 0.0;
+    for (unsigned k = 0; k < N_LOOP_INTERNAL; k++)
+    {
+        asm volatile(
+            "mma.sync.aligned.m16n8k16.row.col.f64.f64.f64.f64 "
+            "{%0, %1, %2, %3}, "
+            "{%4, %5, %6, %7, %8, %9, %10, %11}, "
+            "{%12, %13, %14, %15}, "
+            "{%16, %17, %18, %19};\n"
+            : "=d"(d0), "=d"(d1), "=d"(d2), "=d"(d3)
+            : "d"(a0), "d"(a1), "d"(a2), "d"(a3),
+              "d"(a4), "d"(a5), "d"(a6), "d"(a7),
+              "d"(b0), "d"(b1), "d"(b2), "d"(b3),
+              "d"(d0), "d"(d1), "d"(d2), "d"(d3));
+        __syncwarp();
+    }
+    double *ptr = &data[threadIdx.y * 16 * 8];
+    ptr[threadIdx.x * 4 + 0] = d0;
+    ptr[threadIdx.x * 4 + 1] = d1;
+    ptr[threadIdx.x * 4 + 2] = d2;
+    ptr[threadIdx.x * 4 + 3] = d3;
+}
+
+__global__ void mma_f64f64f64_16_8_4(void *data, int *rc)
+{
+    mma_f64f64f64_16_8_4_((double *)data);
+    *rc = 0;
+}
+
+__global__ void mma_f64f64f64_16_8_8(void *data, int *rc)
+{
+    mma_f64f64f64_16_8_8_((double *)data);
+    *rc = 0;
+}
+
+__global__ void mma_f64f64f64_16_8_16(void *data, int *rc)
+{
+    mma_f64f64f64_16_8_16_((double *)data);
+    *rc = 0;
+}
+#else
+__global__ void mma_f64f64f64_16_8_4(void *data, int *rc)
+{
+    *rc = 1;
+}
+
+__global__ void mma_f64f64f64_16_8_8(void *data, int *rc)
+{
+    *rc = 1;
+}
+
+__global__ void mma_f64f64f64_16_8_16(void *data, int *rc)
 {
     *rc = 1;
 }
@@ -876,8 +994,15 @@ int main(int argc, char **argv)
         run_fma<float>((void *)fma_fp32, "fma_fp32", targetTime);
 
         print_heading("FP64", '-');
+        // SM80: m8n8k4 only; SM90/SM100: + m16n8k4 / m16n8k8 / m16n8k16
         printf("- mma_f64f64f64_8_8_4\n");
         run<double, 8, 8, 4>((void *)mma_f64f64f64_8_8_4, targetTime);
+        printf("- mma_f64f64f64_16_8_4\n");
+        run<double, 16, 8, 4>((void *)mma_f64f64f64_16_8_4, targetTime);
+        printf("- mma_f64f64f64_16_8_8\n");
+        run<double, 16, 8, 8>((void *)mma_f64f64f64_16_8_8, targetTime);
+        printf("- mma_f64f64f64_16_8_16\n");
+        run<double, 16, 8, 16>((void *)mma_f64f64f64_16_8_16, targetTime);
         printf("- fma_fp64 (scalar)\n");
         run_fma<double>((void *)fma_fp64, "fma_fp64", targetTime);
     }
