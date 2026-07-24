@@ -524,8 +524,13 @@ __global__ void fma_fp64(void *data, int *rc)
     *rc = 0;
 }
 
-// FP64 Tensor Core: mma.m8n8k4 (Ampere / SM80+)
-#if __CUDA_ARCH__ >= 800
+// FP64 Tensor Core: mma.m8n8k4 — datacenter only
+// Supported: SM80 (A100), SM90 (H100/H200), SM100–SM110 (Blackwell DC)
+// NOT supported: SM86/87 (GA10x/Orin), SM89 (Ada), SM120+ (consumer Blackwell)
+// Using >= 800 incorrectly emits this insn on consumer GPUs → illegal instruction
+#if (__CUDA_ARCH__ == 800) ||                       \
+    (__CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000) || \
+    (__CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1200)
 __device__ void mma_f64f64f64_8_8_4_(double *data)
 {
     double d0 = 0.0;
